@@ -2,34 +2,57 @@
 name: Build Chess APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
-  android:
-    runs-on: ubuntu-latest
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
     steps:
-      - name: Get project
+      - name: Checkout project
         uses: actions/checkout@v4
 
-      - name: Install Java
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-    
-      
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: ''
-          log-accepted-android-sdk-licenses: false
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+          MANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$MANAGER" ]; then
+            MANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          fi
+
+          if [ -z "$MANAGER" ] || [ ! -f "$MANAGER" ]; then
+            echo "Android SDK manager was not found."
+            exit 1
+          fi
+
+          echo "SDK_MANAGER=$MANAGER" >> "$GITHUB_ENV"
 
       - name: Install Android packages
+        shell: bash
         run: |
-          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          set -e
+          yes | "$SDK_MANAGER" --licenses || true
+          "$SDK_MANAGER" --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Install Godot
         uses: chickensoft-games/setup-godot@v2
@@ -38,58 +61,81 @@ jobs:
           use-dotnet: false
           include-templates: true
 
-      - name: Create debug signing key
+      - name: Generate signing key
+        shell: bash
         run: |
           keytool -genkeypair \
-            -keystore debug.keystore \
-            -alias androiddebugkey \
+            -keystore "$RUNNER_TEMP/chess.keystore" \
+            -alias chess \
             -storepass android \
             -keypass android \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=Android Debug,O=Chess,C=US"
+            -dname "CN=Chess,O=Oddesia,C=US"
 
-      - name: Configure Android export
+      - name: Configure export
+        shell: bash
         run: |
-          cat > export_presets.cfg <<'EOF'
-          [preset.0]
-          name="Android"
-          platform="Android"
-          runnable=true
-          export_filter="all_resources"
-          include_filter=""
-          exclude_filter=""
-          export_path="build/Chess.apk"
+          python3 - <<'PY'
+          from pathlib import Path
 
-          [preset.0.options]
-          gradle_build/use_gradle_build=false
-          architectures/armeabi-v7a=false
-          architectures/arm64-v8a=true
-          package/unique_name="com.oddesia.chess"
-          package/name="Chess"
-          package/signed=true
-          keystore/debug="res://debug.keystore"
-          keystore/debug_user="androiddebugkey"
-          keystore/debug_password="android"
-          EOF
+          lines = [
+              '[preset.0]',
+              '',
+              'name="Android"',
+              'platform="Android"',
+              'runnable=true',
+              'advanced_options=false',
+              'dedicated_server=false',
+              'custom_features=""',
+              'export_filter="all_resources"',
+              'include_filter=""',
+              'exclude_filter=""',
+              'export_path="build/Chess.apk"',
+              '',
+              '[preset.0.options]',
+              '',
+              'gradle_build/use_gradle_build=false',
+              'architectures/armeabi-v7a=false',
+              'architectures/arm64-v8a=true',
+              'package/unique_name="com.oddesia.chess"',
+              'package/name="Chess"',
+              'package/signed=true',
+              'package/retain_data_on_uninstall=false',
+              'package/min_sdk=23',
+              'package/target_sdk=35',
+          ]
 
-      - name: Import game
-        run: godot --headless --editor --path . --import
+          Path("export_presets.cfg").write_text(
+              "\n".join(lines) + "\n"
+          )
+          PY
 
-      - name: Build APK
+      - name: Import Godot project
+        shell: bash
+        run: |
+          godot --headless --editor --path . --import
+
+      - name: Build Chess APK
+        shell: bash
         env:
-          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
-          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ runner.temp }}/chess.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: chess
           GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
         run: |
+          set -e
           mkdir -p build
-          godot --headless --path . \
-            --export-debug Android build/Chess.apk
 
-      - name: Upload APK
+          godot --headless --path . \
+            --export-debug "Android" "build/Chess.apk"
+
+          test -s build/Chess.apk
+
+      - name: Upload finished APK
         uses: actions/upload-artifact@v4
         with:
-          name: Chess-Android-APK
+          name: Chess-APK
           path: build/Chess.apk
-
+          if-no-files-found: error
+          retention-days: 30
